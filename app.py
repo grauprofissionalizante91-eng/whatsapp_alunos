@@ -130,6 +130,7 @@ tipo_mensagem = st.radio(
     [
         "1: Mensagem customizada para alunos com presença",
         "2: Mensagem customizada para alunos faltosos",
+        "3: Mensagem personalizada livre",
     ],
     horizontal=False,
 )
@@ -163,18 +164,27 @@ mensagem_falta = (
     "Instrutor do Curso Interativo — {instituicao}"
 )
 
-modelo_padrao = (
-    mensagem_presenca
-    if tipo_mensagem.startswith("1:")
-    else mensagem_falta
-)
+if tipo_mensagem.startswith("1:"):
+    modelo_padrao = mensagem_presenca
+elif tipo_mensagem.startswith("2:"):
+    modelo_padrao = mensagem_falta
+else:
+    modelo_padrao = (
+        "Olá, {nome}! Tudo bem?\n\n"
+        "Aqui é {nome_instrutor}, da {instituicao}. "
+        "Estou entrando em contato sobre o curso {curso}.\n\n"
+        "Escreva aqui sua mensagem personalizada."
+    )
+
 mensagem_modelo = st.text_area(
     "Mensagem (você pode editar antes de gerar os links)",
     value=modelo_padrao,
+    key=f"mensagem_modelo_{tipo_mensagem[0]}",
     height=260,
     help=(
         "Campos automáticos disponíveis: {nome}, {curso}, "
-        "{nome_instrutor} e {instituicao}."
+        "{nome_instrutor} e {instituicao}. Na opção 3, escreva livremente "
+        "e mantenha esses campos entre chaves onde quiser personalizar."
     ),
 )
 st.caption(
@@ -298,19 +308,21 @@ if arquivo is not None:
                             links.append(gerar_link(telefone_aluno, mensagem))
                             status.append("OK")
 
-                        resultado["Tipo de mensagem"] = (
-                            "Alunos com presença"
-                            if tipo_mensagem.startswith("1:")
-                            else "Alunos faltosos"
-                        )
+                        if tipo_mensagem.startswith("1:"):
+                            descricao_tipo = "Alunos com presença"
+                            identificador_tipo = "presenca"
+                        elif tipo_mensagem.startswith("2:"):
+                            descricao_tipo = "Alunos faltosos"
+                            identificador_tipo = "faltosos"
+                        else:
+                            descricao_tipo = "Mensagem personalizada livre"
+                            identificador_tipo = "personalizada"
+
+                        resultado["Tipo de mensagem"] = descricao_tipo
                         resultado["Link WhatsApp"] = links
                         resultado["Status"] = status
                         st.session_state["resultado"] = resultado
-                        st.session_state["tipo_resultado"] = (
-                            "presenca"
-                            if tipo_mensagem.startswith("1:")
-                            else "faltosos"
-                        )
+                        st.session_state["tipo_resultado"] = identificador_tipo
 
     except Exception as erro:
         st.error(f"Não foi possível processar a planilha: {erro}")
@@ -329,7 +341,11 @@ if "resultado" in st.session_state:
         + (
             "Mensagem para alunos com presença"
             if st.session_state.get("tipo_resultado") == "presenca"
-            else "Mensagem para alunos faltosos"
+            else (
+                "Mensagem para alunos faltosos"
+                if st.session_state.get("tipo_resultado") == "faltosos"
+                else "Mensagem personalizada livre"
+            )
         )
     )
 
@@ -357,7 +373,11 @@ if "resultado" in st.session_state:
         file_name=(
             "alunos_com_presenca_links.xlsx"
             if st.session_state.get("tipo_resultado") == "presenca"
-            else "alunos_faltosos_links.xlsx"
+            else (
+                "alunos_faltosos_links.xlsx"
+                if st.session_state.get("tipo_resultado") == "faltosos"
+                else "alunos_mensagem_personalizada_links.xlsx"
+            )
         ),
         mime=(
             "application/vnd.openxmlformats-officedocument."
