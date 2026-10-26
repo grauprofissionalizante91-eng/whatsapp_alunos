@@ -4,9 +4,110 @@ from io import BytesIO
 from urllib.parse import urlencode
 
 import pandas as pd
+import pdfplumber
 import streamlit as st
 from openpyxl.styles import Font, PatternFill
 
+
+
+def extrair_relatorio_pdf(arquivo_pdf, tipo_relatorio):
+    """Extrai Contrato, Nome, Telefone e contagem de um relatório CGD."""
+    padrao_telefone = re.compile(
+        r"\(?\d{2}\)?\s*\d{4,5}[-\s]?\d{4}"
+    )
+    registros = []
+
+    with pdfplumber.open(arquivo_pdf) as pdf:
+        texto_paginas = [pagina.extract_text() or "" for pagina in pdf.pages]
+
+    texto_completo = "\n".join(texto_paginas)
+    if tipo_relatorio == "presencas":
+        nome_contagem = "Presenças"
+        # Mantém o cabeçalho de contagem correspondente ao relatório.
+        padrao_cabecalho = re.compile(r"Presenças", re.IGNORECASE)
+    else:
+        nome_contagem = "Faltas"
+        padrao_cabecalho = re.compile(r"Faltas", re.IGNORECASE)
+
+    if not padrao_cabecalho.search(texto_completo):
+        esperado = "presenças" if tipo_relatorio == "presencas" else "faltas"
+        raise ValueError(
+            f"Não identifiquei a coluna de {esperado} no PDF. "
+            "Confirme se o arquivo corresponde ao tipo selecionado."
+        )
+
+    linhas = texto_completo.splitlines()
+    registro_atual = None
+
+    for linha in linhas:
+        linha = " ".join(linha.split())
+        if not linha:
+            continue
+
+        # Ignora cabeçalhos, totais, período e rodapés.
+        if (
+            re.search(r"\bContrato\b", linha, re.IGNORECASE)
+            or re.search(r"\bTotal\b", linha, re.IGNORECASE)
+            or re.search(r"Relatório de", linha, re.IGNORECASE)
+            or re.search(r"Período:", linha, re.IGNORECASE)
+            or re.search(r"Filtro\(s\):", linha, re.IGNORECASE)
+            or re.search(r"Gerado em:", linha, re.IGNORECASE)
+            or re.search(r"Página\s+\d+", linha, re.IGNORECASE)
+            or re.search(r"CGD\s*-\s*Sistema", linha, re.IGNORECASE)
+        ):
+            continue
+
+        # Telefones que continuam na linha seguinte do PDF.
+        telefones_linha = padrao_telefone.findall(linha)
+        if (
+            registro_atual is not None
+            and telefones_linha
+            and not re.match(r"^\d+\s+", linha)
+        ):
+            for telefone in telefones_linha:
+                telefone_limpo = re.sub(r"\D", "", telefone)
+                if telefone_limpo and telefone_limpo not in registro_atual["telefones"]:
+                    registro_atual["telefones"].append(telefone_limpo)
+            registro_atual["Telefone"] = " | ".join(registro_atual["telefones"])
+            continue
+
+        # Cada aluno começa por um número de contrato e termina pela contagem.
+        correspondencia = re.match(r"^\s*(\d+)\s+(.+?)\s+(\d+)\s*$", linha)
+        if not correspondencia:
+            continue
+
+        contrato, conteudo, contagem = correspondencia.groups()
+        telefones = []
+        for telefone in padrao_telefone.findall(conteudo):
+            telefone_limpo = re.sub(r"\D", "", telefone)
+            if telefone_limpo and telefone_limpo not in telefones:
+                telefones.append(telefone_limpo)
+
+        nome = padrao_telefone.sub(" ", conteudo)
+        nome = re.sub(r"\s+", " ", nome).strip(" -|")
+        if not nome:
+            continue
+
+        registro_atual = {
+            "Contrato": contrato,
+            "Nome": nome,
+            "Telefone": " | ".join(telefones),
+            nome_contagem: int(contagem),
+            "telefones": telefones,
+        }
+        registros.append(registro_atual)
+
+    if not registros:
+        raise ValueError(
+            "Não consegui extrair os registros deste PDF. "
+            "O arquivo pode estar digitalizado como imagem ou ter outro layout."
+        )
+
+    colunas = ["Contrato", "Nome", "Telefone", nome_contagem]
+    resultado = pd.DataFrame(registros)
+    resultado = resultado[colunas]
+    resultado["Contrato"] = resultado["Contrato"].astype(str)
+    return resultado
 
 st.set_page_config(
     page_title="Gerador de Links WhatsApp",
@@ -393,3 +494,96 @@ if "resultado" in st.session_state:
 
 st.divider()
 st.caption("Gerador de Links WhatsApp — Grau Técnico")
+
+
+st.divider()
+st.header("📄 Conversor de relatórios PDF para Excel")
+st.write(
+    "Converta os relatórios de faltas individuais ou presenças consecutivas "
+    "do sistema CGD em planilhas Excel para importar os dados no banco."
+)
+
+tipo_relatorio = st.radio(
+    "Escolha o relatório que deseja converter:",
+    [
+        "1: Relatório de faltas (PDF → Excel)",
+        "2: Relatório de presença (PDF → Excel)",
+    ],
+    key="tipo_conversao_relatorio",
+)
+tipo_pdf = "faltas" if tipo_relatorio.startswith("1:") else "presencas"
+
+arquivo_pdf = st.file_uploader(
+    "Selecione o relatório em PDF",
+    type=["pdf"],
+    key="upload_relatorio_pdf",
+)
+
+if arquivo_pdf is not None:
+    if st.button(
+        "Converter relatório para Excel",
+        key="botao_converter_pdf",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner("Lendo o PDF e organizando os dados..."):
+                df_relatorio = extrair_relatorio_pdf(arquivo_pdf, tipo_pdf)
+                st.session_state["relatorio_convertido"] = df_relatorio
+                st.session_state["tipo_relatorio_convertido"] = tipo_pdf
+            st.success(
+                f"Conversão concluída: {len(df_relatorio)} registros extraídos."
+            )
+        except Exception as erro:
+            st.error(f"Não foi possível converter o relatório: {erro}")
+
+if "relatorio_convertido" in st.session_state:
+    tipo_convertido = st.session_state["tipo_relatorio_convertido"]
+    # Exibe os dados apenas para o tipo selecionado atualmente, evitando confusão.
+    if tipo_convertido == tipo_pdf:
+        df_relatorio = st.session_state["relatorio_convertido"]
+        st.subheader("Prévia dos dados extraídos")
+        st.dataframe(df_relatorio, use_container_width=True, hide_index=True)
+
+        buffer_excel = BytesIO()
+        with pd.ExcelWriter(buffer_excel, engine="openpyxl") as writer:
+            df_relatorio.to_excel(writer, index=False, sheet_name="Relatorio")
+            planilha_pdf = writer.sheets["Relatorio"]
+            for celula in planilha_pdf[1]:
+                celula.font = Font(bold=True, color="FFFFFF")
+                celula.fill = PatternFill(fill_type="solid", fgColor="167D46")
+            planilha_pdf.freeze_panes = "A2"
+            planilha_pdf.auto_filter.ref = planilha_pdf.dimensions
+            for coluna in planilha_pdf.columns:
+                letra = coluna[0].column_letter
+                maior = max(
+                    len(str(celula.value or ""))
+                    for celula in coluna[:50]
+                )
+                planilha_pdf.column_dimensions[letra].width = min(
+                    max(maior + 2, 14), 40
+                )
+        buffer_excel.seek(0)
+
+        nome_arquivo_saida = (
+            "relatorio_faltas.xlsx"
+            if tipo_convertido == "faltas"
+            else "relatorio_presencas.xlsx"
+        )
+        st.download_button(
+            "⬇️ Baixar relatório convertido em Excel",
+            data=buffer_excel.getvalue(),
+            file_name=nome_arquivo_saida,
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="baixar_relatorio_excel",
+            type="primary",
+            use_container_width=True,
+        )
+        st.caption(
+            "Os telefones são exportados somente com números e, quando houver "
+            "mais de um, ficam na mesma célula separados por |. Confira a prévia "
+            "antes de importar no banco de dados."
+        )
